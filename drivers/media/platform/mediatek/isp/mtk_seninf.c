@@ -111,9 +111,13 @@ MODULE_PARM_DESC(lane_mux_override, "raw MIPI_RX_CON24 LN0..3 mux byte (bits 31:
 static bool test_pattern;
 module_param(test_pattern, bool, 0644);
 MODULE_PARM_DESC(test_pattern, "feed the seninf test-pattern generator instead of the sensor (sensor still streams)");
-static int cam_mux_out = -1;
+static int lens_focus = 330;
+module_param(lens_focus, int, 0644);
+MODULE_PARM_DESC(lens_focus, "lens (VCM) position applied while a sensor with a lens streams, returned to 0 afterwards (-1 = leave the lens alone; krane ov8856+dw9768: 330 ~ 0.4 m..far)");
+/* MT8183: CAM2 feeds CAMSV1 and CAM3 feeds CAMSV2 (same as MT8365, found on HW). */
+static int cam_mux_out = 2;
 module_param(cam_mux_out, int, 0644);
-MODULE_PARM_DESC(cam_mux_out, "MT8183: CAMx output fed by output pad i is CAM(cam_mux_out + i); -1 = route the mux to ALL 8 CAMx outputs");
+MODULE_PARM_DESC(cam_mux_out, "MT8183: CAMx output fed by output pad i is CAM(cam_mux_out + i) (default 2: CAM2->CAMSV1, CAM3->CAMSV2); -1 = route the mux to ALL 8 CAMx outputs (single camera only)");
 
 /**
  * struct mtk_seninf_format_info - Information about media bus formats
@@ -153,6 +157,9 @@ struct mtk_seninf_input {
 
 	struct v4l2_subdev *source_sd;
 	struct media_pad *source_pad;
+
+	struct v4l2_subdev *lens;
+	bool lens_active;
 };
 
 /**
@@ -746,9 +753,10 @@ static void mtk_seninf_top_mux_setup(struct mtk_seninf *priv,
 	}
 
 	/*
-	 * MT8183: which CAMx output feeds which CAMSV instance is not
-	 * documented. By default route this mux to every CAMx output (as the
-	 * ChromeOS driver did by writing 0); unused consumers stay idle.
+	 * MT8183: CAMx -> CAMSV wiring found on hardware: CAM2 -> CAMSV1,
+	 * CAM3 -> CAMSV2. cam_mux_out = -1 routes the mux to every CAMx
+	 * output instead (as the ChromeOS driver did by writing 0), which only
+	 * works with one camera streaming at a time.
 	 */
 	if (cam_mux_out < 0) {
 		val = 0;
@@ -791,6 +799,74 @@ static void mtk_seninf_test_pattern(struct mtk_seninf_input *input,
 		 format->width, format->height, input->pad, mux->mux_id);
 }
 
+/*
+ * The simple libcamera pipeline does not drive lenses, and a voice-coil lens
+ * left at its rest position is focused beyond infinity. Move the lens linked
+ * to the sensor (DT lens-focus -> ancillary link) to a fixed position while
+ * streaming, and back to rest (no coil current) when the stream stops.
+ */
+static struct v4l2_subdev *mtk_seninf_find_lens(struct mtk_seninf_input *input)
+{
+	struct media_entity *sensor = &input->source_sd->entity;
+	struct media_link *link;
+
+	list_for_each_entry(link, &sensor->links, list) {
+		struct media_entity *ent;
+
+		if ((link->flags & MEDIA_LNK_FL_LINK_TYPE) !=
+		    MEDIA_LNK_FL_ANCILLARY_LINK)
+			continue;
+
+		ent = gobj_to_entity(link->gobj1);
+		if (ent == sensor)
+			ent = gobj_to_entity(link->gobj0);
+		if (ent->function == MEDIA_ENT_F_LENS &&
+		    is_media_entity_v4l2_subdev(ent))
+			return media_entity_to_v4l2_subdev(ent);
+	}
+
+	return NULL;
+}
+
+static void mtk_seninf_lens_set(struct mtk_seninf_input *input, bool on)
+{
+	struct v4l2_ctrl *ctrl;
+	int ret;
+
+	if (on) {
+		if (lens_focus < 0 || input->lens_active)
+			return;
+		input->lens = mtk_seninf_find_lens(input);
+		if (!input->lens)
+			return;
+		ret = pm_runtime_resume_and_get(input->lens->dev);
+		if (ret < 0) {
+			dev_warn(input->seninf->dev, "lens power-up failed: %d\n", ret);
+			return;
+		}
+		input->lens_active = true;
+	} else if (!input->lens_active) {
+		return;
+	}
+
+	ctrl = v4l2_ctrl_find(input->lens->ctrl_handler, V4L2_CID_FOCUS_ABSOLUTE);
+	if (ctrl) {
+		ret = v4l2_ctrl_s_ctrl(ctrl, on ? clamp_t(s32, lens_focus, ctrl->minimum,
+							  ctrl->maximum) :
+				       ctrl->minimum);
+		if (ret)
+			dev_warn(input->seninf->dev, "lens focus: %d\n", ret);
+		else
+			dev_dbg(input->seninf->dev, "lens %s at %d\n",
+				input->lens->name, on ? lens_focus : 0);
+	}
+
+	if (!on) {
+		pm_runtime_put(input->lens->dev);
+		input->lens_active = false;
+	}
+}
+
 static void mtk_seninf_start(struct mtk_seninf *priv,
 			    struct v4l2_subdev_state *state,
 			    struct mtk_seninf_input *input,
@@ -804,6 +880,8 @@ static void mtk_seninf_start(struct mtk_seninf *priv,
 	}
 
 	phy_power_on(input->phy);
+
+	mtk_seninf_lens_set(input, true);
 
 	mtk_seninf_input_setup_csi2_rx(input);
 	mtk_seninf_input_setup_csi2(input, state);
@@ -827,6 +905,8 @@ static void mtk_seninf_stop(struct mtk_seninf_input *input)
 		 SENINF_CSI2_CTL_DATA_LANE1_EN |
 		 SENINF_CSI2_CTL_DATA_LANE0_EN);
 	mtk_seninf_input_write(input, SENINF_CSI2_CTL, val);
+
+	mtk_seninf_lens_set(input, false);
 
 	phy_power_off(input->phy);
 }
