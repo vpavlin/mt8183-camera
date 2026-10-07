@@ -1,0 +1,22 @@
+<!-- SPDX-License-Identifier: GPL-2.0 -->
+<!doctype html><html><body><pre id="log"></pre><script>
+const log = (...a) => { console.log('CAMTEST ' + a.join(' ')); };
+async function frames(v, ms) { let n = 0; const t0 = performance.now(); return new Promise(r => { const cb = () => { n++; if (performance.now() - t0 < ms) v.requestVideoFrameCallback(cb); else r(n / (ms / 1000)); }; v.requestVideoFrameCallback(cb); }); }
+(async () => {
+  try {
+    const s0 = await navigator.mediaDevices.getUserMedia({ video: true }); s0.getTracks().forEach(t => t.stop());
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    const vids = [];
+    for (const d of devs) {
+      try {
+        const s = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: d.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } } });
+        const v = document.createElement('video'); v.muted = true; v.srcObject = s; await v.play(); vids.push([d.label, v]);
+        log('opened', d.label);
+      } catch (e) { log('open failed', d.label, e.name, e.message); }
+    }
+    const fps = await Promise.all(vids.map(([l, v]) => frames(v, 5000)));
+    vids.forEach(([l, v], i) => log('concurrent', l, `${v.videoWidth}x${v.videoHeight}`, 'fps', fps[i].toFixed(1)));
+    log('done');
+  } catch (e) { log('error', e.name, e.message); }
+})();
+</script></body></html>

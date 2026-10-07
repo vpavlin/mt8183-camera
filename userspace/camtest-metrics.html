@@ -1,0 +1,45 @@
+<!-- SPDX-License-Identifier: GPL-2.0 -->
+<!doctype html><html><body><pre id="log"></pre><script>
+const log = (...a) => { const s = a.join(' '); console.log('CAMTEST ' + s); document.getElementById('log').textContent += s + '\n'; };
+function metrics(v) {
+  const c = document.createElement('canvas'); c.width = v.videoWidth; c.height = v.videoHeight;
+  const g = c.getContext('2d'); g.drawImage(v, 0, 0);
+  const d = g.getImageData(0, 0, c.width, c.height).data, W = c.width, H = c.height;
+  const Y = new Float32Array(W * H); let sum = 0, clip = 0;
+  for (let i = 0; i < W * H; i++) { const y = 0.2126 * d[4*i] + 0.7152 * d[4*i+1] + 0.0722 * d[4*i+2]; Y[i] = y; sum += y; if (y >= 250) clip++; }
+  // row-to-row horizontal shift of the gradient (stride mismatch => constant non-zero shift)
+  const shifts = [];
+  for (let r = 40; r < H - 1; r += Math.max(1, Math.floor(H / 40))) {
+    let best = 0, bestv = Infinity;
+    for (let s = -24; s <= 24; s++) {
+      let acc = 0;
+      for (let x = 40; x < W - 40; x += 2) {
+        const a = Y[r*W + x + 1] - Y[r*W + x], bx = x + s;
+        const b = Y[(r+1)*W + bx + 1] - Y[(r+1)*W + bx]; acc += Math.abs(a - b);
+      }
+      if (acc < bestv) { bestv = acc; best = s; }
+    }
+    shifts.push(best);
+  }
+  const zero = shifts.filter(s => s === 0).length / shifts.length;
+  return `mean ${(sum / (W*H)).toFixed(0)} clip ${(100*clip/(W*H)).toFixed(1)}% zero-shift-rows ${(100*zero).toFixed(0)}%`;
+}
+(async () => {
+  try {
+    const s0 = await navigator.mediaDevices.getUserMedia({ video: true }); s0.getTracks().forEach(t => t.stop());
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    const sizes = (location.hash.slice(1) || '1600x1200,1400x1050,1280x720').split(',');
+    for (const d of devs) for (const sz of sizes) {
+      const [w, h] = sz.split('x').map(Number);
+      const s = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: d.deviceId }, width: { ideal: w }, height: { ideal: h } } });
+      const v = document.createElement('video'); v.muted = true; v.srcObject = s; await v.play();
+      await new Promise(r => setTimeout(r, 4000));
+      const st = s.getVideoTracks()[0].getSettings();
+      log(d.label, 'asked', sz, 'got', `${v.videoWidth}x${v.videoHeight}@${st.frameRate}`, metrics(v));
+      if (d.label === 'ov8856') await new Promise(r => setTimeout(r, 10));
+      s.getTracks().forEach(t => t.stop());
+    }
+    log('done');
+  } catch (e) { log('error', e.name, e.message); }
+})();
+</script></body></html>
