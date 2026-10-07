@@ -169,7 +169,7 @@ void mtk_camsv_cmos_vf_hw_enable(struct mtk_cam_dev *cam_dev)
 	mtk_camsv_tg_write(cam_dev, CAMSV_TG_VF_CON,
 			     mtk_camsv_tg_read(cam_dev, CAMSV_TG_VF_CON) |
 			     CAMSV_TG_VF_CON_VFDATA_EN);
-	dev_info(cam_dev->dev,
+	dev_dbg(cam_dev->dev,
 		 "stream on: MODULE_EN %08x FMT_SEL %08x PAK %08x CLK_EN %08x TG_SEN_MODE %08x VF_CON %08x GRAB %08x/%08x\n",
 		 mtk_camsv_read(cam_dev, CAMSV_MODULE_EN),
 		 mtk_camsv_read(cam_dev, CAMSV_FMT_SEL),
@@ -179,7 +179,7 @@ void mtk_camsv_cmos_vf_hw_enable(struct mtk_cam_dev *cam_dev)
 		 mtk_camsv_tg_read(cam_dev, CAMSV_TG_VF_CON),
 		 mtk_camsv_tg_read(cam_dev, CAMSV_TG_SEN_GRAB_PXL),
 		 mtk_camsv_tg_read(cam_dev, CAMSV_TG_SEN_GRAB_LIN));
-	dev_info(cam_dev->dev, "stream on: IMGO base %08x xsize %08x ysize %08x stride %08x con %08x con2 %08x\n",
+	dev_dbg(cam_dev->dev, "stream on: IMGO base %08x xsize %08x ysize %08x stride %08x con %08x con2 %08x\n",
 		 readl(cam_dev->regs_img0 + CAMSV_IMGO_SV_BASE_ADDR),
 		 readl(cam_dev->regs_img0 + cam_dev->conf->imgo_xsize),
 		 readl(cam_dev->regs_img0 + cam_dev->conf->imgo_ysize),
@@ -203,7 +203,7 @@ void mtk_camsv_cmos_vf_hw_disable(struct mtk_cam_dev *cam_dev)
 		fbc_val &= ~CAMSV_IMGO_FBC_EN;
 		mtk_camsv_write(cam_dev, CAMSV_IMGO_FBC, fbc_val);
 	}
-	dev_info(cam_dev->dev, "stream off: irqs %u frames %u scratch %u errors %u last status %08x\n",
+	dev_dbg(cam_dev->dev, "stream off: irqs %u frames %u scratch %u errors %u last status %08x\n",
 		 cam_dev->irq_cnt, cam_dev->done_cnt, cam_dev->scratch_cnt,
 		 cam_dev->err_cnt, cam_dev->last_status);
 }
@@ -367,7 +367,7 @@ void mtk_camsv_setup(struct mtk_cam_dev *cam_dev, unsigned int count,
 	}
 	spin_unlock_irqrestore(&cam_dev->buf_list_lock, flags);
 
-	dev_info(cam_dev->dev, "setup %ux%u bpl %u mbus 0x%x fmt_sel %08x pak %08x stride %08x tg_sen_mode %08x\n",
+	dev_dbg(cam_dev->dev, "setup %ux%u bpl %u mbus 0x%x fmt_sel %08x pak %08x stride %08x tg_sen_mode %08x\n",
 		 w, h, bpl, mbus_fmt, fmt_sel, pak, stride_bits | bpl,
 		 tg_sen_mode);
 
@@ -405,7 +405,7 @@ static irqreturn_t isp_irq_camsv(int irq, void *data)
 	}
 
 	if (cam_dev->irq_cnt <= 5)
-		dev_info(cam_dev->dev, "irq #%u status %08x TG_INTER_ST %08x\n",
+		dev_dbg(cam_dev->dev, "irq #%u status %08x TG_INTER_ST %08x\n",
 			 cam_dev->irq_cnt, irq_status,
 			 mtk_camsv_tg_read(cam_dev, 0x4c));
 

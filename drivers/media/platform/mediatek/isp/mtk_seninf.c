@@ -521,7 +521,7 @@ static void mtk_seninf_input_setup_csi2_rx(struct mtk_seninf_input *input)
 		for (i = 0; i < MTK_CSI_MAX_LANES; ++i)
 			lanes[i] = (lane_mux_override >> (2 * i)) & 0x3;
 
-	dev_info(input->seninf->dev,
+	dev_dbg(input->seninf->dev,
 		 "input %u: %u data lanes, clock lane %u, lane mux %u %u %u %u\n",
 		 input->pad, input->bus.num_data_lanes, input->bus.clock_lane,
 		 lanes[0], lanes[1], lanes[2], lanes[3]);
@@ -762,7 +762,7 @@ static void mtk_seninf_top_mux_setup(struct mtk_seninf *priv,
 		val |= (mux->mux_id & 0xf) << (out * 4);
 	}
 	mtk_seninf_write(priv, SENINF_TOP_CAM_MUX_CTRL, val);
-	dev_info(priv->dev, "TOP_MUX_CTRL %08x CAM_MUX_CTRL %08x\n",
+	dev_dbg(priv->dev, "TOP_MUX_CTRL %08x CAM_MUX_CTRL %08x\n",
 		 mtk_seninf_read(priv, SENINF_TOP_MUX_CTRL), val);
 }
 
@@ -787,7 +787,7 @@ static void mtk_seninf_test_pattern(struct mtk_seninf_input *input,
 	mtk_seninf_mux_update(mux, SENINF_MUX_CTRL, SENINF_SRC_SEL, 1);
 	mtk_seninf_mux_update(mux, SENINF_MUX_CTRL_EXT, SENINF_SRC_SEL_EXT,
 			      SENINF_TEST_MODEL);
-	dev_info(input->seninf->dev, "test pattern %ux%u on input %u mux %u\n",
+	dev_dbg(input->seninf->dev, "test pattern %ux%u on input %u mux %u\n",
 		 format->width, format->height, input->pad, mux->mux_id);
 }
 
