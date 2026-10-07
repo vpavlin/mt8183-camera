@@ -101,6 +101,7 @@ struct mtk_seninf_conf {
 	bool two_pixel_mode;	/* MUX PIX_SEL 2-pixel (MT8365) vs 1-pixel */
 	bool set_ck_sel_2;	/* force PHY_SENINF_CTL_CSI0.CK_SEL_2 = 2 */
 	bool cam_mux_8365;	/* CAM2 <- mux0, CAM3 <- mux1 hard-wired */
+	bool init_top_ctrl;	/* TOP_CTRL resets to MUX_LP_MODE, pixel clocks off */
 };
 
 /* MT8183 bring-up knobs */
@@ -795,6 +796,13 @@ static void mtk_seninf_start(struct mtk_seninf *priv,
 			    struct mtk_seninf_input *input,
 			    struct mtk_seninf_mux *mux)
 {
+	if (priv->conf->init_top_ctrl) {
+		/* As the ChromeOS MT8183 driver: SENINF_PCLK_EN | SENINF2_PCLK_EN. */
+		mtk_seninf_write(priv, SENINF_TOP_CTRL,
+				 SENINF_TOP_CTRL_SENINF_PCLK_EN |
+				 SENINF_TOP_CTRL_SENINF2_PCLK_EN);
+	}
+
 	phy_power_on(input->phy);
 
 	mtk_seninf_input_setup_csi2_rx(input);
@@ -1568,6 +1576,7 @@ static const struct mtk_seninf_conf seninf_8183_conf = {
 	.nb_inputs = 4,
 	.nb_muxes = 8,
 	.nb_outputs = 4,
+	.init_top_ctrl = true,
 };
 
 static const struct of_device_id mtk_seninf_of_match[] = {
