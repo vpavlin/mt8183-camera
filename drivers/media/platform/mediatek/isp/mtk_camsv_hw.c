@@ -580,8 +580,8 @@ static void mtk_camsv_remove(struct platform_device *pdev)
 
 	debugfs_remove_recursive(cam_dev->dbg);
 	mtk_cam_dev_cleanup(cam_dev);
+	/* runtime PM is disabled by the devm action of devm_pm_runtime_enable() */
 	pm_runtime_dont_use_autosuspend(cam_dev->dev);
-	pm_runtime_disable(cam_dev->dev);
 
 }
 
