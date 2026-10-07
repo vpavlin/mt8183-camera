@@ -1,0 +1,14 @@
+# kbuild output
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+*.a
+*.dtb
+Module.symvers
+modules.order
+.tmp_versions/
+# local captures / scratch
+*.raw
+*.ppm
