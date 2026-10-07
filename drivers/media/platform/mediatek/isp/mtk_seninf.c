@@ -9,6 +9,8 @@
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/debugfs.h>
+#include <linux/seq_file.h>
 #include <linux/property.h>
 #include <linux/videodev2.h>
 #include <media/media-device.h>
@@ -30,7 +32,7 @@
 
 #define SENINF_MAX_NUM_INPUTS		4
 #define SENINF_MAX_NUM_OUTPUTS		6
-#define SENINF_MAX_NUM_MUXES		6
+#define SENINF_MAX_NUM_MUXES		8
 #define SENINF_MAX_NUM_PADS		(SENINF_MAX_NUM_INPUTS + \
 					 SENINF_MAX_NUM_OUTPUTS)
 
@@ -96,7 +98,21 @@ struct mtk_seninf_conf {
 	u8 nb_inputs;
 	u8 nb_muxes;
 	u8 nb_outputs;
+	bool two_pixel_mode;	/* MUX PIX_SEL 2-pixel (MT8365) vs 1-pixel */
+	bool set_ck_sel_2;	/* force PHY_SENINF_CTL_CSI0.CK_SEL_2 = 2 */
+	bool cam_mux_8365;	/* CAM2 <- mux0, CAM3 <- mux1 hard-wired */
 };
+
+/* MT8183 bring-up knobs */
+static int lane_mux_override = -1;
+module_param(lane_mux_override, int, 0644);
+MODULE_PARM_DESC(lane_mux_override, "raw MIPI_RX_CON24 LN0..3 mux byte (bits 31:24), e.g. 0xc9 (-1 = from DT)");
+static bool test_pattern;
+module_param(test_pattern, bool, 0644);
+MODULE_PARM_DESC(test_pattern, "feed the seninf test-pattern generator instead of the sensor (sensor still streams)");
+static int cam_mux_out = -1;
+module_param(cam_mux_out, int, 0644);
+MODULE_PARM_DESC(cam_mux_out, "MT8183: CAMx output fed by output pad i is CAM(cam_mux_out + i); -1 = route the mux to ALL 8 CAMx outputs");
 
 /**
  * struct mtk_seninf_format_info - Information about media bus formats
@@ -187,6 +203,7 @@ struct mtk_seninf {
 	struct mtk_seninf_mux muxes[SENINF_MAX_NUM_MUXES];
 
 	const struct mtk_seninf_conf *conf;
+	struct dentry *dbg;
 };
 
 inline struct mtk_seninf *sd_to_mtk_seninf(struct v4l2_subdev *sd)
@@ -456,8 +473,9 @@ static void mtk_seninf_csi2_setup_phy(struct mtk_seninf *priv)
 				  DPHY_MODE, 0 /* 4D1C */);
 		mtk_seninf_update(priv, SENINF_TOP_PHY_SENINF_CTL_CSI0,
 				  CK_SEL_1, input->bus.clock_lane);
-		mtk_seninf_update(priv, SENINF_TOP_PHY_SENINF_CTL_CSI0,
-				  CK_SEL_2, 2);
+		if (priv->conf->set_ck_sel_2)
+			mtk_seninf_update(priv, SENINF_TOP_PHY_SENINF_CTL_CSI0,
+					  CK_SEL_2, 2);
 		mtk_seninf_update(priv, SENINF_TOP_PHY_SENINF_CTL_CSI0,
 				  PHY_SENINF_LANE_MUX_CSI0_EN, 1);
 	}
@@ -497,6 +515,15 @@ static void mtk_seninf_input_setup_csi2_rx(struct mtk_seninf_input *input)
 		if (lanes[i] > input->bus.clock_lane)
 			lanes[i]--;
 	}
+
+	if (lane_mux_override >= 0)
+		for (i = 0; i < MTK_CSI_MAX_LANES; ++i)
+			lanes[i] = (lane_mux_override >> (2 * i)) & 0x3;
+
+	dev_info(input->seninf->dev,
+		 "input %u: %u data lanes, clock lane %u, lane mux %u %u %u %u\n",
+		 input->pad, input->bus.num_data_lanes, input->bus.clock_lane,
+		 lanes[0], lanes[1], lanes[2], lanes[3]);
 
 	mtk_seninf_input_update(input, MIPI_RX_CON24_CSI0,
 				CSI0_BIST_LN0_MUX, lanes[0]);
@@ -649,7 +676,7 @@ static void mtk_seninf_mux_setup(struct mtk_seninf_mux *mux,
 			      SENINF_NORMAL_MODEL);
 
 	pix_sel_ext = 0;
-	pix_sel = 1;
+	pix_sel = input->seninf->conf->two_pixel_mode ? 1 : 0;
 	mtk_seninf_mux_update(mux, SENINF_MUX_CTRL_EXT, SENINF_PIX_SEL_EXT,
 			      pix_sel_ext);
 	mtk_seninf_mux_update(mux, SENINF_MUX_CTRL, SENINF_PIX_SEL, pix_sel);
@@ -701,18 +728,66 @@ static void mtk_seninf_top_mux_setup(struct mtk_seninf *priv,
 	val |= (seninf_id & 0xf) << (mux->mux_id * 4);
 	mtk_seninf_write(priv, SENINF_TOP_MUX_CTRL, val);
 
+	if (priv->conf->cam_mux_8365) {
+		/*
+		 * We currently support only seninf version 3.0
+		 * where camsv0 and camsv1 are hardwired respectively to
+		 * SENINF_CAM2 and SENINF_CAM3 i.e :
+		 *  - SENINF_TOP_CAM_MUX_CTRL[11:8] = 0
+		 *  - SENINF_TOP_CAM_MUX_CTRL[15:12] = 1
+		 * so we hardcode it here
+		 */
+		mtk_seninf_update(priv, SENINF_TOP_CAM_MUX_CTRL,
+				  SENINF_CAM2_MUX_SRC_SEL, 0);
+		mtk_seninf_update(priv, SENINF_TOP_CAM_MUX_CTRL,
+				  SENINF_CAM3_MUX_SRC_SEL, 1);
+		return;
+	}
+
 	/*
-	 * We currently support only seninf version 3.0
-	 * where camsv0 and camsv1 are hardwired respectively to
-	 * SENINF_CAM2 and SENINF_CAM3 i.e :
-	 *  - SENINF_TOP_CAM_MUX_CTRL[11:8] = 0
-	 *  - SENINF_TOP_CAM_MUX_CTRL[15:12] = 1
-	 * so we hardcode it here
+	 * MT8183: which CAMx output feeds which CAMSV instance is not
+	 * documented. By default route this mux to every CAMx output (as the
+	 * ChromeOS driver did by writing 0); unused consumers stay idle.
 	 */
-	mtk_seninf_update(priv, SENINF_TOP_CAM_MUX_CTRL,
-			  SENINF_CAM2_MUX_SRC_SEL, 0);
-	mtk_seninf_update(priv, SENINF_TOP_CAM_MUX_CTRL,
-			  SENINF_CAM3_MUX_SRC_SEL, 1);
+	if (cam_mux_out < 0) {
+		val = 0;
+		for (unsigned int i = 0; i < 8; i++)
+			val |= (mux->mux_id & 0xf) << (i * 4);
+	} else {
+		unsigned int out = cam_mux_out + mux->pad - priv->conf->nb_inputs;
+
+		val = mtk_seninf_read(priv, SENINF_TOP_CAM_MUX_CTRL);
+		val &= ~(0xf << (out * 4));
+		val |= (mux->mux_id & 0xf) << (out * 4);
+	}
+	mtk_seninf_write(priv, SENINF_TOP_CAM_MUX_CTRL, val);
+	dev_info(priv->dev, "TOP_MUX_CTRL %08x CAM_MUX_CTRL %08x\n",
+		 mtk_seninf_read(priv, SENINF_TOP_MUX_CTRL), val);
+}
+
+static void mtk_seninf_test_pattern(struct mtk_seninf_input *input,
+				    struct mtk_seninf_mux *mux,
+				    struct v4l2_subdev_state *state)
+{
+	const struct v4l2_mbus_framefmt *format;
+
+	format = v4l2_subdev_state_get_format(state, input->pad, 0);
+
+	/* Sequence from the ChromeOS MT8183 driver (TEST_GEN_PATTERN). */
+	mtk_seninf_input_update(input, SENINF_CTRL, SENINF_SRC_SEL, 1);
+	mtk_seninf_input_update(input, SENINF_CTRL_EXT, SENINF_TESTMDL_IP_EN, 1);
+	mtk_seninf_input_write(input, SENINF_TG1_TM_SIZE,
+			       ((format->height + 0x100) << 16) |
+			       (format->width + 0x100));
+	mtk_seninf_input_write(input, SENINF_TG1_TM_CLK, 0);
+	mtk_seninf_input_write(input, SENINF_TG1_TM_STP, 1);
+	mtk_seninf_input_write(input, SENINF_TG1_TM_CTL, 0x404c1);
+
+	mtk_seninf_mux_update(mux, SENINF_MUX_CTRL, SENINF_SRC_SEL, 1);
+	mtk_seninf_mux_update(mux, SENINF_MUX_CTRL_EXT, SENINF_SRC_SEL_EXT,
+			      SENINF_TEST_MODEL);
+	dev_info(input->seninf->dev, "test pattern %ux%u on input %u mux %u\n",
+		 format->width, format->height, input->pad, mux->mux_id);
 }
 
 static void mtk_seninf_start(struct mtk_seninf *priv,
@@ -727,6 +802,9 @@ static void mtk_seninf_start(struct mtk_seninf *priv,
 
 	mtk_seninf_mux_setup(mux, input, state);
 	mtk_seninf_top_mux_setup(priv, input->seninf_id, mux);
+
+	if (test_pattern)
+		mtk_seninf_test_pattern(input, mux, state);
 }
 
 static void mtk_seninf_stop(struct mtk_seninf_input *input)
@@ -1330,6 +1408,47 @@ err_clean_media:
 	return ret;
 }
 
+static void seninf_dump_range(struct seq_file *m, struct mtk_seninf *priv,
+			      const char *name, u32 start, u32 end)
+{
+	u32 off;
+
+	seq_printf(m, "%s:", name);
+	for (off = start; off < end; off += 4)
+		seq_printf(m, "%s%08x", (off - start) % 32 ? " " : "\n  ",
+			   readl(priv->base + off));
+	seq_puts(m, "\n");
+}
+
+/* Register snapshot of the inputs/muxes used on krane (only while powered). */
+static int seninf_regs_show(struct seq_file *m, void *unused)
+{
+	struct mtk_seninf *priv = m->private;
+	char name[48];
+	unsigned int i;
+
+	if (!pm_runtime_get_if_in_use(priv->dev)) {
+		seq_puts(m, "not powered (only readable while streaming)\n");
+		return 0;
+	}
+	seninf_dump_range(m, priv, "top 0x000", 0x0, 0x30);
+	for (i = 0; i < 3; i++) {	/* SENINF1, SENINF2, SENINF3 blocks */
+		snprintf(name, sizeof(name), "seninf%u ctrl 0x%x", i + 1, 0x1000 * i + 0x200);
+		seninf_dump_range(m, priv, name, 0x1000 * i + 0x200, 0x1000 * i + 0x220);
+		snprintf(name, sizeof(name), "seninf%u tg 0x%x", i + 1, 0x1000 * i + 0x600);
+		seninf_dump_range(m, priv, name, 0x1000 * i + 0x600, 0x1000 * i + 0x620);
+		snprintf(name, sizeof(name), "seninf%u rx 0x%x", i + 1, 0x1000 * i + 0x800);
+		seninf_dump_range(m, priv, name, 0x1000 * i + 0x800, 0x1000 * i + 0x840);
+		snprintf(name, sizeof(name), "seninf%u csi2 0x%x", i + 1, 0x1000 * i + 0xa00);
+		seninf_dump_range(m, priv, name, 0x1000 * i + 0xa00, 0x1000 * i + 0xb40);
+		snprintf(name, sizeof(name), "mux%u 0x%x", i, 0x1000 * i + 0xd00);
+		seninf_dump_range(m, priv, name, 0x1000 * i + 0xd00, 0x1000 * i + 0xd40);
+	}
+	pm_runtime_put(priv->dev);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(seninf_regs);
+
 #ifdef CONFIG_PM
 static int seninf_pm_suspend(struct device *dev)
 {
@@ -1408,13 +1527,20 @@ static int seninf_probe(struct platform_device *pdev)
 
 	devm_pm_runtime_enable(dev);
 
-	return mtk_seninf_v4l2_register(priv);
+	priv->dbg = debugfs_create_dir(dev_name(dev), NULL);
+	debugfs_create_file("regs", 0400, priv->dbg, priv, &seninf_regs_fops);
+
+	ret = mtk_seninf_v4l2_register(priv);
+	if (ret)
+		debugfs_remove_recursive(priv->dbg);
+	return ret;
 }
 
 static void seninf_remove(struct platform_device *pdev)
 {
 	struct mtk_seninf *priv = dev_get_drvdata(&pdev->dev);
 
+	debugfs_remove_recursive(priv->dbg);
 	media_device_unregister(&priv->media_dev);
 	media_device_cleanup(&priv->media_dev);
 	v4l2_async_nf_unregister(&priv->notifier);
@@ -1429,10 +1555,22 @@ static const struct mtk_seninf_conf seninf_8365_conf = {
 	.nb_inputs = 4,
 	.nb_muxes = 6,
 	.nb_outputs = 4,
+	.two_pixel_mode = true,
+	.set_ck_sel_2 = true,
+	.cam_mux_8365 = true,
+};
+
+/* MT8183: outputs are DT ports 4..7 -> CAMSV1..4, 1:1 with MUX0..3. */
+static const struct mtk_seninf_conf seninf_8183_conf = {
+	.model = "mtk-camsys-mt8183",
+	.nb_inputs = 4,
+	.nb_muxes = 8,
+	.nb_outputs = 4,
 };
 
 static const struct of_device_id mtk_seninf_of_match[] = {
 	{ .compatible = "mediatek,mt8365-seninf", .data = &seninf_8365_conf },
+	{ .compatible = "mediatek,mt8183-seninf", .data = &seninf_8183_conf },
 	{ /* sentinel */ },
 };
 MODULE_DEVICE_TABLE(of, mtk_seninf_of_match);
