@@ -34,8 +34,8 @@ Same register family as MT8365 (ISP 3.0) and the ChromeOS MT8183 driver:
   driver writes 0xC00 (`SENINF_PCLK_EN | SENINF2_PCLK_EN`); the MT8365 v8 driver never touches
   it. The MT8183 configuration in this driver writes 0xC00 at stream start.
 - MT8183 runs the MUX in 1-pixel mode (MT8365 v8 uses 2-pixel mode).
-- Which CAMx output feeds which CAMSV is not documented. The driver routes the selected MUX to
-  all eight CAMx outputs by default (`cam_mux_out` module parameter to pick one).
+- CAMx → CAMSV wiring (found on hardware, same as MT8365): **CAM2 → CAMSV1, CAM3 → CAMSV2**.
+  The driver routes output pad i to CAM(2 + i) (`cam_mux_out`, -1 = all eight outputs).
 
 Port mapping (DT `port@N` → seninf input): 0 = CSI0 (4-lane, C/D-PHY) → SENINF1,
 1 = CSI1 (4-lane D-PHY) → SENINF3, 2 = CSI2 → SENINF5, 3 = CSI0B → SENINF2.
