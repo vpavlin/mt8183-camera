@@ -42,6 +42,7 @@ struct mtk_cam_format_info {
 };
 
 const struct mtk_cam_format_info *mtk_cam_format_info_by_code(u32 code);
+void mtk_cam_format_info_apply_out_mode(unsigned int out_mode);
 
 
 struct mtk_cam_dev_buffer {
@@ -125,20 +126,48 @@ struct mtk_cam_dev {
 
 	spinlock_t buf_list_lock;
 	struct list_head buf_list;
+
+	/* no-FBC (MT8183) buffer tracking, protected by buf_list_lock */
+	struct mtk_cam_dev_buffer *cur;
+	void *scratch_va;
+	dma_addr_t scratch_dma;
+	size_t scratch_size;
+
+	/* debug counters */
+	u32 irq_cnt;
+	u32 done_cnt;
+	u32 err_cnt;
+	u32 scratch_cnt;
+	u32 last_status;
+	struct dentry *dbg;
 };
 
 /**
  * struct mtk_cam_conf - MediaTek camera configuration structure
  * @tg_sen_mode: TG sensor mode
  * @module_en: module enable
- * @imgo_con: dma control register
- * @imgo_con2: dma control register 2
+ * @imgo_con: dma control register value
+ * @imgo_con2: dma control register 2 value
+ * @imgo_xsize: IMGO XSIZE register offset (from the IMGO window)
+ * @imgo_ysize: IMGO YSIZE register offset
+ * @imgo_stride: IMGO STRIDE register offset
+ * @imgo_con_reg: IMGO CON register offset
+ * @imgo_con2_reg: IMGO CON2 register offset
+ * @has_fbc: single-register IMGO FBC at top+0x1c (MT8365); without it the
+ *	driver re-programs IMGO_BASE_ADDR per frame and parks the DMA on a
+ *	scratch buffer when no user buffer is queued (MT8183)
  */
 struct mtk_cam_conf {
 	u32 tg_sen_mode;
 	u32 module_en;
 	u32 imgo_con;
 	u32 imgo_con2;
+	u32 imgo_xsize;
+	u32 imgo_ysize;
+	u32 imgo_stride;
+	u32 imgo_con_reg;
+	u32 imgo_con2_reg;
+	bool has_fbc;
 };
 
 int mtk_cam_dev_init(struct mtk_cam_dev *cam_dev);

@@ -39,7 +39,7 @@ to_mtk_cam_dev_buffer(struct vb2_buffer *buf)
  * Format Information
  */
 
-static const struct mtk_cam_format_info mtk_cam_format_info[] = {
+static struct mtk_cam_format_info mtk_cam_format_info[] = {
 	{
 		.fourcc = V4L2_PIX_FMT_SBGGR8,
 		.code = MEDIA_BUS_FMT_SBGGR8_1X8,
@@ -219,6 +219,81 @@ static const struct mtk_cam_format_info mtk_cam_format_info[] = {
 	},
 };
 
+/* Pixel formats exposed on the video node, rebuilt by the out_mode fixup. */
+static u32 stream_out_fmts[ARRAY_SIZE(mtk_cam_format_info)];
+static unsigned int num_stream_out_fmts;
+
+static u32 bayer8_of(u32 code)
+{
+	switch (code) {
+	case MEDIA_BUS_FMT_SBGGR10_1X10: return V4L2_PIX_FMT_SBGGR8;
+	case MEDIA_BUS_FMT_SGBRG10_1X10: return V4L2_PIX_FMT_SGBRG8;
+	case MEDIA_BUS_FMT_SGRBG10_1X10: return V4L2_PIX_FMT_SGRBG8;
+	case MEDIA_BUS_FMT_SRGGB10_1X10: return V4L2_PIX_FMT_SRGGB8;
+	}
+	return 0;
+}
+
+static u32 bayer10p_of(u32 code)
+{
+	switch (code) {
+	case MEDIA_BUS_FMT_SBGGR10_1X10: return V4L2_PIX_FMT_SBGGR10P;
+	case MEDIA_BUS_FMT_SGBRG10_1X10: return V4L2_PIX_FMT_SGBRG10P;
+	case MEDIA_BUS_FMT_SGRBG10_1X10: return V4L2_PIX_FMT_SGRBG10P;
+	case MEDIA_BUS_FMT_SRGGB10_1X10: return V4L2_PIX_FMT_SRGGB10P;
+	}
+	return 0;
+}
+
+/*
+ * The sensors on MT8183 boards only output 10-bit Bayer. What the camsv
+ * writes to memory for it is chosen by out_mode:
+ *  0: PAK RAW_8   -> 8-bit Bayer fourcc (8 MSBs)
+ *  1: PAK RAW_10  -> 10-bit packed (advertised as *10P; the real layout is
+ *                    MediaTek's LSB-first packing - for inspection only)
+ *  2: PAK off     -> 16-bit little-endian Bayer (V4L2 *10)
+ * 8-bit and YUV entries are left untouched. The 8-bit sensor-code entries
+ * stay first, so fourcc lookups for 8-bit fourccs never hit a 10-bit entry;
+ * the hardware is always configured from the sink pad bus code.
+ */
+void mtk_cam_format_info_apply_out_mode(unsigned int out_mode)
+{
+	unsigned int i, j;
+
+	num_stream_out_fmts = 0;
+	for (i = 0; i < ARRAY_SIZE(mtk_cam_format_info); i++) {
+		struct mtk_cam_format_info *info = &mtk_cam_format_info[i];
+
+		if (bayer8_of(info->code)) {
+			switch (out_mode) {
+			case 0:
+				info->fourcc = bayer8_of(info->code);
+				info->bpp = 8;
+				info->module_en_pak = CAMSV_MODULE_EN_PAK_EN;
+				info->pak = CAMSV_PAK_PAK_MODE_RAW_8;
+				break;
+			case 1:
+				info->fourcc = bayer10p_of(info->code);
+				info->bpp = 10;
+				info->module_en_pak = CAMSV_MODULE_EN_PAK_EN;
+				info->pak = CAMSV_PAK_PAK_MODE_RAW_10;
+				break;
+			default:
+				info->bpp = 16;
+				info->module_en_pak = 0;
+				info->pak = 0;
+				break;
+			}
+		}
+
+		for (j = 0; j < num_stream_out_fmts; j++)
+			if (stream_out_fmts[j] == info->fourcc)
+				break;
+		if (j == num_stream_out_fmts)
+			stream_out_fmts[num_stream_out_fmts++] = info->fourcc;
+	}
+}
+
 static const struct mtk_cam_format_info *
 mtk_cam_format_info_by_fourcc(u32 fourcc)
 {
@@ -369,6 +444,12 @@ static void mtk_cam_vb2_buf_queue(struct vb2_buffer *vb)
 
 	/* Add the buffer into the tracking list */
 	spin_lock_irqsave(&cam->buf_list_lock, flags);
+	if (!cam->conf->has_fbc) {
+		/* picked up by the ISR at the next frame end */
+		list_add_tail(&buf->list, &cam->buf_list);
+		spin_unlock_irqrestore(&cam->buf_list_lock, flags);
+		return;
+	}
 	if (vb2_start_streaming_called(vb->vb2_queue) && list_empty(&cam->buf_list))
 		mtk_camsv_update_buffers_add(cam, buf);
 
@@ -385,6 +466,11 @@ void mtk_cam_vb2_return_all_buffers(struct mtk_cam_dev *cam,
 	unsigned long flags;
 
 	spin_lock_irqsave(&cam->buf_list_lock, flags);
+	if (cam->cur) {
+		cam->cur->daddr = 0ULL;
+		vb2_buffer_done(&cam->cur->v4l2_buf.vb2_buf, state);
+		cam->cur = NULL;
+	}
 	list_for_each_entry_safe(buf, buf_prev, &cam->buf_list, list) {
 		buf->daddr = 0ULL;
 		list_del(&buf->list);
@@ -401,16 +487,33 @@ static int mtk_cam_vb2_start_streaming(struct vb2_queue *vq,
 		vb2_queue_to_mtk_cam_video_device(vq);
 	struct device *dev = cam->dev;
 	const struct v4l2_pix_format_mplane *fmt = &vdev->format;
+	struct v4l2_subdev_state *state;
+	u32 code;
 	int ret;
+
+	/* Configure the hardware from the bus code actually received. */
+	state = v4l2_subdev_lock_and_get_active_state(&cam->subdev);
+	code = v4l2_subdev_state_get_format(state, MTK_CAM_CIO_PAD_SENINF)->code;
+	v4l2_subdev_unlock_state(state);
+	if (!mtk_cam_format_info_by_code(code))
+		code = vdev->fmtinfo->code;
+
+	ret = mtk_camsv_scratch_alloc(cam, fmt->plane_fmt[0].sizeimage);
+	if (ret) {
+		mtk_cam_vb2_return_all_buffers(cam, VB2_BUF_STATE_QUEUED);
+		return ret;
+	}
 
 	ret = pm_runtime_resume_and_get(dev);
 	if (ret) {
 		dev_err(dev, "failed to get pm_runtime\n");
+		mtk_camsv_scratch_free(cam);
+		mtk_cam_vb2_return_all_buffers(cam, VB2_BUF_STATE_QUEUED);
 		return ret;
 	}
 
 	mtk_camsv_setup(cam, count, fmt->width, fmt->height,
-			fmt->plane_fmt[0].bytesperline, vdev->fmtinfo->code);
+			fmt->plane_fmt[0].bytesperline, code);
 
 	/* Enable CMOS and VF */
 	mtk_camsv_cmos_vf_hw_enable(cam);
@@ -435,8 +538,11 @@ fail_no_stream:
 	video_device_pipeline_stop(&vdev->vdev);
 	mtk_cam_vb2_return_all_buffers(cam, VB2_BUF_STATE_QUEUED);
 fail_pm_put:
+	mtk_camsv_cmos_vf_hw_disable(cam);
+	mtk_cam_vb2_return_all_buffers(cam, VB2_BUF_STATE_QUEUED);
 	pm_runtime_mark_last_busy(cam->dev);
 	pm_runtime_put_autosuspend(cam->dev);
+	mtk_camsv_scratch_free(cam);
 
 	return ret;
 }
@@ -460,6 +566,7 @@ static void mtk_cam_vb2_stop_streaming(struct vb2_queue *vq)
 
 	pm_runtime_mark_last_busy(cam->dev);
 	pm_runtime_put_autosuspend(cam->dev);
+	mtk_camsv_scratch_free(cam);
 }
 
 static const struct vb2_ops mtk_cam_vb2_ops = {
@@ -878,21 +985,9 @@ static const struct v4l2_file_operations mtk_cam_v4l2_fops = {
  * Init & Cleanup
  */
 
-static const u32 stream_out_fmts[] = {
-	/* The 1st entry is the default image format */
-	V4L2_PIX_FMT_SBGGR8,
-	V4L2_PIX_FMT_SGBRG8,
-	V4L2_PIX_FMT_SGRBG8,
-	V4L2_PIX_FMT_SRGGB8,
-	V4L2_PIX_FMT_UYVY,
-	V4L2_PIX_FMT_VYUY,
-	V4L2_PIX_FMT_YUYV,
-	V4L2_PIX_FMT_YVYU,
-};
 
-static const struct mtk_cam_vdev_desc video_stream = {
+static struct mtk_cam_vdev_desc video_stream = {
 	.fmts = stream_out_fmts,
-	.num_fmts = ARRAY_SIZE(stream_out_fmts),
 	.frmsizes =
 		&(struct v4l2_frmsizeenum){
 			.index = 0,
@@ -918,6 +1013,7 @@ int mtk_cam_video_register(struct mtk_cam_dev *cam)
 
 	vb2_dma_contig_set_max_seg_size(cam->dev, DMA_BIT_MASK(32));
 
+	video_stream.num_fmts = num_stream_out_fmts;
 	cam_vdev->desc = &video_stream;
 
 	/* Initialize mtk_cam_video_device */
