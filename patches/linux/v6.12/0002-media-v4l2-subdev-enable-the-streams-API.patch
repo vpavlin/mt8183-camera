@@ -1,0 +1,25 @@
+From: Václav Pavlín <vaclav.pavlin@gmail.com>
+Subject: [PATCH LOCAL] media: v4l2-subdev: enable the streams API for userspace
+
+NOT FOR UPSTREAM. In Linux 6.12 the subdev streams/routing uAPI is still
+gated by a compile-time switch. libcamera's simple pipeline handler only
+follows a subdev's internal routes when VIDIOC_SUBDEV_G_ROUTING works;
+without it, both MT8183 sensors resolve to the first CAMSV video node.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/media/v4l2-core/v4l2-subdev.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/media/v4l2-core/v4l2-subdev.c b/drivers/media/v4l2-core/v4l2-subdev.c
+--- a/drivers/media/v4l2-core/v4l2-subdev.c
++++ b/drivers/media/v4l2-core/v4l2-subdev.c
+@@ -32,7 +32,7 @@
+  * 'v4l2_subdev_enable_streams_api' to 1 below.
+  */
+ 
+-static bool v4l2_subdev_enable_streams_api;
++static bool v4l2_subdev_enable_streams_api = true;
+ #endif
+ 
+ /*

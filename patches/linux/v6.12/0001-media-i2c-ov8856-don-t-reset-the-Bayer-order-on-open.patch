@@ -1,0 +1,84 @@
+From f0092e36e5557426f983a0505c874f47d0a00134 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?V=C3=A1clav=20Pavl=C3=ADn?= <vaclav.pavlin@gmail.com>
+Date: Wed, 7 Oct 2026 06:36:20 +0200
+Subject: [PATCH] media: i2c: ov8856: don't reset the Bayer order on open and
+ G_FMT
+
+ov8856_update_pad_format() stores the index of the media bus code it
+resolves in ov8856->cur_mbus_index, falling back to the mode's default
+code when the requested one is unknown. It is called for the TRY format
+initialised in the subdev .open() handler and for the ACTIVE format in
+.get_fmt() with a zero code, so every open of the subdev node and every
+VIDIOC_SUBDEV_G_FMT silently reverted the Bayer order selected by
+.set_fmt() to the mode default, while .get_fmt() reported that default.
+The hardware then streamed a different Bayer order than the one
+configured on the link, and media pipeline validation failed with
+-EPIPE (seen with libcamera, which opens the sensor subdev more than
+once).
+
+Only update cur_mbus_index from an ACTIVE .set_fmt(), and report the
+active code from .get_fmt().
+
+Fixes: f1363166f91e ("media: ov8856: Set default mbus format but allow caller to alter")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/media/i2c/ov8856.c | 25 +++++++++++++++++++++++--
+ 1 file changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/i2c/ov8856.c b/drivers/media/i2c/ov8856.c
+index 23d524de7..c0e1613bc 100644
+--- a/drivers/media/i2c/ov8856.c
++++ b/drivers/media/i2c/ov8856.c
+@@ -1973,10 +1973,19 @@ static void ov8856_update_pad_format(struct ov8856 *ov8856,
+ 	if (index == ARRAY_SIZE(ov8856_mbus_codes))
+ 		index = mode->default_mbus_index;
+ 	fmt->code = ov8856_mbus_codes[index];
+-	ov8856->cur_mbus_index = index;
+ 	fmt->field = V4L2_FIELD_NONE;
+ }
+ 
++static u32 ov8856_mbus_index(u32 code)
++{
++	u32 index;
++
++	for (index = 0; index < ARRAY_SIZE(ov8856_mbus_codes); ++index)
++		if (ov8856_mbus_codes[index] == code)
++			return index;
++	return 0;
++}
++
+ static int ov8856_start_streaming(struct ov8856 *ov8856)
+ {
+ 	struct i2c_client *client = v4l2_get_subdevdata(&ov8856->sd);
+@@ -2137,6 +2146,11 @@ static int ov8856_set_format(struct v4l2_subdev *sd,
+ 		*v4l2_subdev_state_get_format(sd_state, fmt->pad) = fmt->format;
+ 	} else {
+ 		ov8856->cur_mode = mode;
++		/*
++		 * Only an ACTIVE set_fmt selects the Bayer order; TRY formats,
++		 * G_FMT and subdev open() used to reset it to the mode default.
++		 */
++		ov8856->cur_mbus_index = ov8856_mbus_index(fmt->format.code);
+ 		__v4l2_ctrl_s_ctrl(ov8856->link_freq, mode->link_freq_index);
+ 		__v4l2_ctrl_s_ctrl_int64(ov8856->pixel_rate,
+ 					 to_rate(ov8856->priv_lane->link_freq_menu_items,
+@@ -2174,8 +2188,15 @@ static int ov8856_get_format(struct v4l2_subdev *sd,
+ 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY)
+ 		fmt->format = *v4l2_subdev_state_get_format(sd_state,
+ 							    fmt->pad);
+-	else
++	else {
++		/*
++		 * Report the active Bayer order instead of resetting it to the
++		 * mode default (update_pad_format() falls back to the default
++		 * for an unknown/zero code and overwrites cur_mbus_index).
++		 */
++		fmt->format.code = ov8856_mbus_codes[ov8856->cur_mbus_index];
+ 		ov8856_update_pad_format(ov8856, ov8856->cur_mode, &fmt->format);
++	}
+ 
+ 	mutex_unlock(&ov8856->mutex);
+ 
+-- 
+2.55.0
+
