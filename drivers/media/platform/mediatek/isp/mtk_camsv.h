@@ -169,6 +169,7 @@ struct mtk_cam_conf {
 	u32 imgo_con_reg;
 	u32 imgo_con2_reg;
 	bool has_fbc;
+	bool pak_reversed;	/* MT8183: PAK 0=RAW8 .. 3=RAW14 (MT8365: 0=RAW14 .. 3=RAW8) */
 };
 
 int mtk_cam_dev_init(struct mtk_cam_dev *cam_dev);

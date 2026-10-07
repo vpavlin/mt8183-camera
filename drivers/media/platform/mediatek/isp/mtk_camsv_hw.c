@@ -82,6 +82,7 @@ static const struct mtk_cam_conf camsv_8183_conf = {
 	.imgo_con_reg = CAMSV_8183_IMGO_CON,
 	.imgo_con2_reg = CAMSV_8183_IMGO_CON2,
 	.has_fbc = false,
+	.pak_reversed = true,
 	.tg_sen_mode = 0,
 	.module_en = CAMSV_MODULE_EN_DB_EN | CAMSV_MODULE_EN_TG_EN,
 	.imgo_con = ((0x8  << CAMSV_IMGO_SV_CON_MAX_BURST_LEN_SHIFT) &
@@ -290,7 +291,7 @@ void mtk_camsv_setup(struct mtk_cam_dev *cam_dev, unsigned int count,
 	struct mtk_cam_dev_buffer *buf;
 	unsigned long flags;
 	unsigned int i;
-	u32 tmp, stride_bits, fmt_sel, tg_sen_mode;
+	u32 tmp, stride_bits, fmt_sel, tg_sen_mode, pak;
 
 	for (i = 0; i < count; i++)
 		mtk_camsv_fbc_inc(cam_dev);
@@ -336,8 +337,12 @@ void mtk_camsv_setup(struct mtk_cam_dev *cam_dev, unsigned int count,
 			conf->module_en | fmtinfo->module_en_pak);
 	fmt_sel = fmt_sel_override >= 0 ? fmt_sel_override : fmtinfo->fmt_sel;
 	mtk_camsv_write(cam_dev, CAMSV_FMT_SEL, fmt_sel);
-	mtk_camsv_write(cam_dev, CAMSV_PAK, pak_override >= 0 ? pak_override :
-			fmtinfo->pak);
+	pak = fmtinfo->pak;
+	if (conf->pak_reversed && (fmtinfo->module_en_pak & CAMSV_MODULE_EN_PAK_EN))
+		pak = CAMSV_PAK_PAK_MODE_RAW_8 - pak;
+	if (pak_override >= 0)
+		pak = pak_override;
+	mtk_camsv_write(cam_dev, CAMSV_PAK, pak);
 
 	mtk_camsv_img0_write(cam_dev, conf->imgo_xsize, bpl - 1U);
 	mtk_camsv_img0_write(cam_dev, conf->imgo_ysize, h - 1U);
@@ -363,7 +368,7 @@ void mtk_camsv_setup(struct mtk_cam_dev *cam_dev, unsigned int count,
 	spin_unlock_irqrestore(&cam_dev->buf_list_lock, flags);
 
 	dev_info(cam_dev->dev, "setup %ux%u bpl %u mbus 0x%x fmt_sel %08x pak %08x stride %08x tg_sen_mode %08x\n",
-		 w, h, bpl, mbus_fmt, fmt_sel, fmtinfo->pak, stride_bits | bpl,
+		 w, h, bpl, mbus_fmt, fmt_sel, pak, stride_bits | bpl,
 		 tg_sen_mode);
 
 	/* CMOS_EN first */
