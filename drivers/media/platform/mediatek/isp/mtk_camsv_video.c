@@ -690,6 +690,7 @@ static void mtk_cam_subdev_unregistered(struct v4l2_subdev *sd)
 		mtk_cam_video_unregister(&cam->vdev);
 		cam->vdev_registered = false;
 	}
+	cam->seninf = NULL;
 }
 
 static int camsv_enable_streams(struct v4l2_subdev *sd,
@@ -700,12 +701,14 @@ static int camsv_enable_streams(struct v4l2_subdev *sd,
 	struct v4l2_subdev *seninf;
 	int ret;
 
+	/*
+	 * Look the seninf up on every start: it can be unbound and bound
+	 * again (module reload), and a cached pad would then be stale.
+	 */
+	cam->seninf = media_pad_remote_pad_first(&cam->subdev_pads[MTK_CAM_CIO_PAD_SENINF]);
 	if (!cam->seninf) {
-		cam->seninf = media_pad_remote_pad_first(&cam->subdev_pads[MTK_CAM_CIO_PAD_SENINF]);
-		if (!cam->seninf) {
-			dev_err(cam->dev, "No SENINF connected\n");
-			return -ENOLINK;
-		}
+		dev_err(cam->dev, "No SENINF connected\n");
+		return -ENOLINK;
 	}
 
 	seninf = media_entity_to_v4l2_subdev(cam->seninf->entity);
