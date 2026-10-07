@@ -140,6 +140,7 @@ struct mtk_cam_dev {
 	u32 scratch_cnt;
 	u32 last_status;
 	struct dentry *dbg;
+	bool vdev_registered;
 };
 
 /**

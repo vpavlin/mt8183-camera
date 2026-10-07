@@ -669,8 +669,27 @@ static int mtk_cam_subdev_registered(struct v4l2_subdev *sd)
 {
 	struct mtk_cam_dev *cam = to_mtk_cam_dev(sd);
 
+	int ret;
+
 	/* Create the video device and link. */
-	return mtk_cam_video_register(cam);
+	ret = mtk_cam_video_register(cam);
+	if (!ret)
+		cam->vdev_registered = true;
+	return ret;
+}
+
+/*
+ * Called when the seninf (which owns the v4l2_device) unbinds us: drop the
+ * video node too, so a later re-bind does not register it twice.
+ */
+static void mtk_cam_subdev_unregistered(struct v4l2_subdev *sd)
+{
+	struct mtk_cam_dev *cam = to_mtk_cam_dev(sd);
+
+	if (cam->vdev_registered) {
+		mtk_cam_video_unregister(&cam->vdev);
+		cam->vdev_registered = false;
+	}
 }
 
 static int camsv_enable_streams(struct v4l2_subdev *sd,
@@ -740,6 +759,7 @@ static const struct v4l2_subdev_ops mtk_cam_subdev_ops = {
 static const struct v4l2_subdev_internal_ops mtk_cam_internal_ops = {
 	.init_state = mtk_cam_init_state,
 	.registered = mtk_cam_subdev_registered,
+	.unregistered = mtk_cam_subdev_unregistered,
 };
 
 /* -----------------------------------------------------------------------------
@@ -797,7 +817,10 @@ static int mtk_cam_v4l2_register(struct mtk_cam_dev *cam)
 
 static void mtk_cam_v4l2_unregister(struct mtk_cam_dev *cam)
 {
-	mtk_cam_video_unregister(&cam->vdev);
+	if (cam->vdev_registered) {
+		mtk_cam_video_unregister(&cam->vdev);
+		cam->vdev_registered = false;
+	}
 
 	media_entity_cleanup(&cam->subdev.entity);
 	v4l2_async_unregister_subdev(&cam->subdev);
