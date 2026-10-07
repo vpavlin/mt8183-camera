@@ -1036,6 +1036,15 @@ int mtk_cam_video_register(struct mtk_cam_dev *cam)
 
 	vb2_dma_contig_set_max_seg_size(cam->dev, DMA_BIT_MASK(32));
 
+	/*
+	 * The video node is (re-)registered every time the seninf binds us;
+	 * an embedded video_device must start from a clean state each time
+	 * (its struct device kobject cannot be initialised twice).
+	 */
+	memset(vdev, 0, sizeof(*vdev));
+	memset(vbq, 0, sizeof(*vbq));
+	mutex_init(&cam_vdev->vdev_lock);
+
 	video_stream.num_fmts = num_stream_out_fmts;
 	cam_vdev->desc = &video_stream;
 
