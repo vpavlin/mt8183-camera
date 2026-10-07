@@ -1,0 +1,37 @@
+<!-- SPDX-License-Identifier: GPL-2.0 -->
+<!doctype html><html><body>
+<h3>MT8183 camera test</h3><select id="sel"></select> <button id="go">start</button><br>
+<video id="v" autoplay playsinline muted style="max-width:90vw"></video>
+<pre id="log"></pre>
+<script>
+const log = (...a) => { const s = a.join(' '); console.log('CAMTEST ' + s); document.getElementById('log').textContent += s + '\n'; };
+async function list() {
+  const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+  devs.forEach(d => log('device', JSON.stringify(d.label), d.deviceId.slice(0, 8)));
+  const sel = document.getElementById('sel'); sel.innerHTML = '';
+  devs.forEach(d => sel.add(new Option(d.label || d.deviceId, d.deviceId)));
+  return devs;
+}
+async function start(deviceId) {
+  const s = await navigator.mediaDevices.getUserMedia({ video: deviceId ? { deviceId: { exact: deviceId } } : true });
+  const t = s.getVideoTracks()[0];
+  log('track', JSON.stringify(t.label), JSON.stringify(t.getSettings()));
+  const v = document.getElementById('v'); v.srcObject = s; await v.play();
+  await new Promise(r => setTimeout(r, 3000));
+  const c = document.createElement('canvas'); c.width = v.videoWidth; c.height = v.videoHeight;
+  const g = c.getContext('2d'); g.drawImage(v, 0, 0);
+  const d = g.getImageData(0, 0, c.width, c.height).data; let sum = 0;
+  for (let i = 0; i < d.length; i += 4) sum += d[i] + d[i + 1] + d[i + 2];
+  log('frame', c.width + 'x' + c.height, 'mean', (sum / (d.length / 4) / 3).toFixed(1));
+  return s;
+}
+document.getElementById('go').onclick = () => start(document.getElementById('sel').value).catch(e => log('error', e.name, e.message));
+(async () => {
+  try {
+    const s0 = await navigator.mediaDevices.getUserMedia({ video: true }); s0.getTracks().forEach(t => t.stop());
+    const devs = await list();
+    if (location.hash === '#auto') for (const d of devs) { const s = await start(d.deviceId); s.getTracks().forEach(t => t.stop()); }
+    log('done');
+  } catch (e) { log('error', e.name, e.message); }
+})();
+</script></body></html>
