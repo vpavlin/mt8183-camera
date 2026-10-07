@@ -35,6 +35,12 @@ MODULE_PARM_DESC(fmt_sel_override, "write this to FMT_SEL instead of the table v
 static int stride_bits_override = -1;
 module_param(stride_bits_override, int, 0644);
 MODULE_PARM_DESC(stride_bits_override, "OR these bits into IMGO STRIDE instead of the table bus-size bits (-1 = table)");
+static int module_en_override = -1;
+module_param(module_en_override, int, 0644);
+MODULE_PARM_DESC(module_en_override, "MODULE_EN value before IMGO_EN is added (-1 = conf | table PAK bits)");
+static int pak_override = -1;
+module_param(pak_override, int, 0644);
+MODULE_PARM_DESC(pak_override, "PAK register value (-1 = table)");
 static int tg_sen_mode_override = -1;
 module_param(tg_sen_mode_override, int, 0644);
 MODULE_PARM_DESC(tg_sen_mode_override, "TG_SEN_MODE base value (-1 = SoC default; MT8183 1-pixel = 0)");
@@ -325,11 +331,13 @@ void mtk_camsv_setup(struct mtk_cam_dev *cam_dev, unsigned int count,
 	mtk_camsv_write(cam_dev, CAMSV_INT_EN, INT_ST_MASK_CAMSV |
 			(conf->has_fbc ? 0 : INT_ST_MASK_CAMSV_ERR));
 
-	mtk_camsv_write(cam_dev, CAMSV_MODULE_EN,
-			  conf->module_en | fmtinfo->module_en_pak);
+	mtk_camsv_write(cam_dev, CAMSV_MODULE_EN, module_en_override >= 0 ?
+			module_en_override :
+			conf->module_en | fmtinfo->module_en_pak);
 	fmt_sel = fmt_sel_override >= 0 ? fmt_sel_override : fmtinfo->fmt_sel;
 	mtk_camsv_write(cam_dev, CAMSV_FMT_SEL, fmt_sel);
-	mtk_camsv_write(cam_dev, CAMSV_PAK, fmtinfo->pak);
+	mtk_camsv_write(cam_dev, CAMSV_PAK, pak_override >= 0 ? pak_override :
+			fmtinfo->pak);
 
 	mtk_camsv_img0_write(cam_dev, conf->imgo_xsize, bpl - 1U);
 	mtk_camsv_img0_write(cam_dev, conf->imgo_ysize, h - 1U);
@@ -383,6 +391,12 @@ static irqreturn_t isp_irq_camsv(int irq, void *data)
 		cam_dev->err_cnt++;
 		dev_err_ratelimited(cam_dev->dev, "irq error 0x%lx\n",
 				    irq_status & INT_ST_MASK_CAMSV_ERR);
+		/* error bits can re-assert continuously: stop listening */
+		if (cam_dev->err_cnt == 64) {
+			mtk_camsv_write(cam_dev, CAMSV_INT_EN, INT_ST_MASK_CAMSV);
+			dev_err(cam_dev->dev, "error irq storm, masking error irqs (status %08x)\n",
+				irq_status);
+		}
 	}
 
 	if (cam_dev->irq_cnt <= 5)
