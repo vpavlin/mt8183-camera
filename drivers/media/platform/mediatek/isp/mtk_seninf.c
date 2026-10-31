@@ -194,6 +194,7 @@ struct mtk_seninf_mux {
  * @conf: Model-specific SENINF parameters
  */
 struct mtk_seninf {
+	u32 streaming_pads;	/* source pads with a running stream (active state lock) */
 	struct device *dev;
 	struct phy *phy[5];
 	unsigned int num_clks;
@@ -960,6 +961,8 @@ static int seninf_enable_streams(struct v4l2_subdev *sd,
 		goto err_no_stream;
 	}
 
+	priv->streaming_pads |= BIT(pad);
+
 	return 0;
 
 err_no_stream:
@@ -995,6 +998,8 @@ static int seninf_disable_streams(struct v4l2_subdev *sd,
 	}
 
 	input = &priv->inputs[sink_pad];
+
+	priv->streaming_pads &= ~BIT(pad);
 
 	source = input->source_sd;
 	ret = v4l2_subdev_disable_streams(source, input->source_pad->index, BIT(0));
@@ -1138,11 +1143,48 @@ static int seninf_set_fmt(struct v4l2_subdev *sd,
 	return 0;
 }
 
+static bool seninf_routing_equal(const struct v4l2_subdev_krouting *a,
+				 const struct v4l2_subdev_krouting *b)
+{
+	unsigned int i;
+
+	if (a->num_routes != b->num_routes)
+		return false;
+
+	for (i = 0; i < a->num_routes; i++) {
+		const struct v4l2_subdev_route *ra = &a->routes[i];
+		const struct v4l2_subdev_route *rb = &b->routes[i];
+
+		if (ra->sink_pad != rb->sink_pad ||
+		    ra->sink_stream != rb->sink_stream ||
+		    ra->source_pad != rb->source_pad ||
+		    ra->source_stream != rb->source_stream ||
+		    ra->flags != rb->flags)
+			return false;
+	}
+
+	return true;
+}
+
 static int seninf_set_routing(struct v4l2_subdev *sd,
 			      struct v4l2_subdev_state *state,
 			      enum v4l2_subdev_format_whence which,
 			      struct v4l2_subdev_krouting *routing)
 {
+	/*
+	 * Setting the routing rebuilds the stream configuration and with it the
+	 * "enabled" flags of all routes. While a stream is running that would
+	 * make the later stream off fail with -EALREADY (libcamera applies the
+	 * routing again when it opens the other camera). Accept an unchanged
+	 * routing as a no-op and refuse a different one.
+	 */
+	if (which == V4L2_SUBDEV_FORMAT_ACTIVE && sd_to_mtk_seninf(sd)->streaming_pads) {
+		if (seninf_routing_equal(&state->routing, routing))
+			return 0;
+
+		return -EBUSY;
+	}
+
 	return __seninf_set_routing(sd, state, routing);
 }
 
