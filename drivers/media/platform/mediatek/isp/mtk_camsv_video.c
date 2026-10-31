@@ -575,8 +575,10 @@ static const struct vb2_ops mtk_cam_vb2_ops = {
 	.buf_queue = mtk_cam_vb2_buf_queue,
 	.start_streaming = mtk_cam_vb2_start_streaming,
 	.stop_streaming = mtk_cam_vb2_stop_streaming,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 0, 0)
 	.wait_prepare = vb2_ops_wait_prepare,
 	.wait_finish = vb2_ops_wait_finish,
+#endif
 };
 
 /* -----------------------------------------------------------------------------
